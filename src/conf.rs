@@ -39,6 +39,7 @@ pub mod pgp;
 pub mod tags;
 #[macro_use]
 pub mod shortcuts;
+pub mod bindings;
 mod listing;
 pub mod terminal;
 mod themes;
@@ -46,6 +47,7 @@ pub use themes::*;
 
 pub mod accounts;
 pub use self::accounts::Account;
+pub use self::bindings::*;
 pub use self::composing::*;
 pub use self::pgp::*;
 pub use self::shortcuts::*;
@@ -212,6 +214,7 @@ pub struct FileSettings {
     pub terminal: TerminalSettings,
     #[serde(default)]
     pub log: LogSettings,
+    pub bindings: Bindings,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -430,6 +433,7 @@ pub struct Settings {
     pub pgp: PGPSettings,
     pub terminal: TerminalSettings,
     pub log: LogSettings,
+    pub bindings: Bindings,
 }
 
 impl Settings {
@@ -462,6 +466,7 @@ impl Settings {
             pgp: fs.pgp,
             terminal: fs.terminal,
             log: fs.log,
+            bindings: fs.bindings,
         })
     }
 
@@ -485,6 +490,7 @@ impl Settings {
             pgp: fs.pgp,
             terminal: fs.terminal,
             log: fs.log,
+            bindings: fs.bindings,
         })
     }
 }

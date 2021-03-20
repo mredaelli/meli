@@ -25,7 +25,7 @@ use serde::{Serialize, Serializer};
 use termion::event::Event as TermionEvent;
 use termion::event::Key as TermionKey;
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub enum Key {
     /// Backspace.
     Backspace,
@@ -67,6 +67,7 @@ pub enum Key {
     Esc,
     Mouse(termion::event::MouseEvent),
     Paste(String),
+    ChordTimeout,
 }
 
 pub use termion::event::MouseButton;
@@ -98,6 +99,7 @@ impl fmt::Display for Key {
             Delete => write!(f, "Delete"),
             Insert => write!(f, "Insert"),
             Mouse(_) => write!(f, "Mouse"),
+            ChordTimeout => write!(f, "Chord timeout"),
         }
     }
 }
@@ -151,6 +153,8 @@ enum InputMode {
 pub enum InputCommand {
     /// Exit thread
     Kill,
+    /// Stop waiting for the next key in a chord
+    ChordTimeout,
 }
 
 use nix::poll::{poll, PollFd, PollFlags};
@@ -166,10 +170,11 @@ use termion::input::TermReadEventsAndRaw;
  */
 /// The thread function that listens for user input and forwards it to the main event loop.
 pub fn get_events(
-    mut closure: impl FnMut((Key, Vec<u8>)),
+    mut closure: impl FnMut((Key, Vec<u8>)) -> bool,
     rx: &Receiver<InputCommand>,
     new_command_fd: RawFd,
     working: std::sync::Arc<()>,
+    chord_timeout_ms: u32,
 ) {
     let stdin = std::io::stdin();
     let stdin_fd = PollFd::new(std::io::stdin().as_raw_fd(), PollFlags::POLLIN);
@@ -177,15 +182,28 @@ pub fn get_events(
     let mut input_mode = InputMode::Normal;
     let mut paste_buf = String::with_capacity(256);
     let mut stdin_iter = stdin.events_and_raw();
-    'poll_while: while let Ok(_n_raw) = poll(&mut [new_command_pollfd, stdin_fd], -1) {
-        //debug!(_n_raw);
+    let mut waiting_for_chord = false;
+    'poll_while: while let Ok(_n_raw) = poll(
+        &mut [new_command_pollfd, stdin_fd],
+        if waiting_for_chord {
+            chord_timeout_ms as i32
+        } else {
+            -1
+        },
+    ) {
         select! {
             default => {
+                if _n_raw == 0 {
+                    if waiting_for_chord {
+                        waiting_for_chord = closure((Key::ChordTimeout, vec![]));
+                    }
+                    continue 'poll_while;
+                }
                 if stdin_fd.revents().is_some() {
                     'stdin_while: while let Some(c) = stdin_iter.next(){
                         match (c, &mut input_mode) {
                             (Ok((TermionEvent::Key(k), bytes)), InputMode::Normal) => {
-                                closure((Key::from(k), bytes));
+                                waiting_for_chord = closure((Key::from(k), bytes));
                                 continue 'poll_while;
                             }
                             (
@@ -236,6 +254,10 @@ pub fn get_events(
                 let _ = nix::unistd::read(new_command_fd, buf.as_mut());
                 match cmd.unwrap() {
                     InputCommand::Kill => return,
+                    InputCommand::ChordTimeout => {
+                        closure((Key::ChordTimeout, vec![]));
+                        continue 'poll_while;
+                    }
                 }
             }
         };
@@ -353,6 +375,7 @@ impl Serialize for Key {
             Key::Null => serializer.serialize_str("Null"),
             Key::Mouse(_) => unreachable!(),
             Key::Paste(s) => serializer.serialize_str(s),
+            Key::ChordTimeout => unreachable!(),
         }
     }
 }

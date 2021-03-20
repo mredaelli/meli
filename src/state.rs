@@ -33,7 +33,7 @@ use super::*;
 use melib::backends::{AccountHash, BackendEventConsumer};
 
 use crate::jobs::JobExecutor;
-use crossbeam::channel::{unbounded, Receiver, Sender};
+use crossbeam::channel::{after, unbounded, Receiver, Sender};
 use indexmap::IndexMap;
 use smallvec::SmallVec;
 use std::env;
@@ -53,6 +53,74 @@ struct InputHandler {
     tx: Sender<InputCommand>,
     state_tx: Sender<ThreadEvent>,
     control: std::sync::Weak<()>,
+    bindings: Bindings,
+    chord_timeout_ms: u32,
+}
+
+use std::time::{Duration, Instant};
+#[derive(Debug, Clone)]
+struct BindingHandler {
+    last_ts: Instant,
+    timeoutlen: Duration,
+    tx: Sender<ThreadEvent>,
+    bindings: Bindings,
+    prefix: Vec<(Key, Vec<u8>)>,
+}
+impl BindingHandler {
+    pub fn new(tx: Sender<ThreadEvent>, bindings: Bindings, chord_timeout_ms: u32) -> Self {
+        BindingHandler {
+            tx,
+            last_ts: Instant::now(),
+            timeoutlen: Duration::new(0, chord_timeout_ms * 1000 * 1000),
+            bindings: bindings.clone(),
+            prefix: vec![],
+        }
+    }
+    pub fn handle_input(&mut self, key: Key, x: Vec<u8>) -> bool {
+        if Instant::now() - self.last_ts > self.timeoutlen && !self.prefix.is_empty() {
+            // No input for a while, but some keys left over: just send what we have
+            for key in &self.prefix {
+                self.tx.send(ThreadEvent::Input(key.clone())).unwrap();
+            }
+            self.prefix = vec![];
+            // and proceed normally
+        }
+
+        self.prefix.push((key.clone(), x.clone()));
+        let filtered_bindings = filter(&self.bindings.normal, &self.prefix);
+        let need_to_wait = match filtered_bindings.len() {
+            0 => {
+                // No matching macro: send the keys
+                for key in &self.prefix {
+                    self.tx.send(ThreadEvent::Input(key.clone())).unwrap();
+                }
+                self.prefix = vec![];
+                false
+            }
+            1 => {
+                let (keys, cmd) = filtered_bindings.into_iter().next().unwrap();
+                if self.prefix.len() == keys.len() {
+                    // Exact match: send the command
+                    // TODO: if we want them recursive... not sure
+                    // TODO: decoding special characters
+                    for key in cmd.chars() {
+                        self.tx
+                            .send(ThreadEvent::Input((Key::Char(key), vec![])))
+                            .unwrap();
+                    }
+                    self.prefix = vec![];
+                    false
+                } else {
+                    true
+                }
+            }
+            _ => true,
+        };
+        if need_to_wait {
+            self.last_ts = Instant::now();
+        }
+        need_to_wait
+    }
 }
 
 impl InputHandler {
@@ -67,17 +135,13 @@ impl InputHandler {
         let rx = self.rx.clone();
         let pipe = self.pipe.0;
         let tx = self.state_tx.clone();
+        let bindings = self.bindings.clone();
+        let timeout = self.chord_timeout_ms.clone();
         thread::Builder::new()
             .name("input-thread".to_string())
             .spawn(move || {
-                get_events(
-                    |i| {
-                        tx.send(ThreadEvent::Input(i)).unwrap();
-                    },
-                    &rx,
-                    pipe,
-                    working,
-                )
+                let mut h = BindingHandler::new(tx.clone(), bindings, timeout);
+                get_events(|(k, x)| h.handle_input(k, x), &rx, pipe, working, timeout)
             })
             .unwrap();
         self.control = control;
@@ -314,6 +378,7 @@ impl State {
 
         let working = Arc::new(());
         let control = Arc::downgrade(&working);
+        let bindings = settings.bindings.clone();
         let mut s = State {
             cols,
             rows,
@@ -354,6 +419,8 @@ impl State {
                     tx: input_thread.0,
                     control,
                     state_tx: sender.clone(),
+                    bindings,
+                    chord_timeout_ms: 500u32,
                 },
                 sender,
                 receiver,

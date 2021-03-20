@@ -92,6 +92,7 @@ pub enum ForkType {
     NewDraft(File, std::process::Child),
 }
 
+
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum NotificationType {
     Info,
